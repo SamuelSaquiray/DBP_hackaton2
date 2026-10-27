@@ -1,0 +1,86 @@
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { api, ApiRequestError } from '../api'
+import type { AuthResponse, MeResponse, Team, User } from '../types'
+
+type AuthState = {
+  token: string | null
+  user: User | null
+  team: Team | null
+  loading: boolean
+  signIn: (email: string, password: string) => Promise<void>
+  signUp: (teamName: string, email: string, password: string) => Promise<void>
+  signOut: () => void
+}
+const AuthContext = createContext<AuthState | null>(null)
+const STORAGE_KEY = 'log-pose-session'
+
+function saveSession(data: AuthResponse): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    token: data.token, user: data.user, team: data.team, expiresAt: data.expiresAt,
+  }))
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [token, setToken] = useState<string | null>(null)
+  const [user, setUser] = useState<User | null>(null)
+  const [team, setTeam] = useState<Team | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const clear = useCallback(() => {
+    localStorage.removeItem(STORAGE_KEY)
+    setToken(null)
+    setUser(null)
+    setTeam(null)
+  }, [])
+
+  const apply = useCallback((data: AuthResponse | MeResponse, nextToken: string) => {
+    setToken(nextToken)
+    setUser(data.user)
+    setTeam(data.team)
+    if ('token' in data) saveSession(data)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const restore = async () => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY)
+        if (!raw) return
+        const session = JSON.parse(raw) as { token?: string; expiresAt?: string }
+        if (!session.token) { clear(); return }
+        if (session.expiresAt && Date.parse(session.expiresAt) <= Date.now()) { clear(); return }
+        const data = await api.me(session.token)
+        if (!cancelled) apply(data, session.token)
+      } catch {
+        if (!cancelled) clear()
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void restore()
+    return () => { cancelled = true }
+  }, [apply, clear])
+
+  const signIn = useCallback(async (email: string, password: string) => {
+    const data = await api.login(email, password)
+    saveSession(data)
+    apply(data, data.token)
+  }, [apply])
+
+  const signUp = useCallback(async (teamName: string, email: string, password: string) => {
+    const data = await api.register(teamName, email, password)
+    saveSession(data)
+    apply(data, data.token)
+  }, [apply])
+
+  const signOut = useCallback(() => clear(), [clear])
+  const value = useMemo(() => ({ token, user, team, loading, signIn, signUp, signOut }), [token, user, team, loading, signIn, signUp, signOut])
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+export function useAuth(): AuthState {
+  const value = useContext(AuthContext)
+  if (!value) throw new Error('useAuth debe usarse dentro de AuthProvider')
+  return value
+}
