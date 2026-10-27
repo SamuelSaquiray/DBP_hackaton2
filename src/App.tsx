@@ -4,6 +4,7 @@ import { api, ApiRequestError } from './api'
 import { EmptyBlock, ErrorBlock, LoadingBlock, Money, PageTitle, Protected, StatusPill } from './components'
 import { useAuth } from './state/AuthContext'
 import type { DashboardSummary, LogPose, NewsDetail, NewsItem, SagaStory, SagaSummary, WantedDetail, WantedSummary } from './types'
+import { useWanted } from './state/WantedContext'
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : 'Algo salió mal. Inténtalo de nuevo.'
@@ -239,61 +240,281 @@ function Dashboard() {
 function WantedRow({ item, rank }: { item: WantedSummary; rank?: number }) {
   return <Link to={`/wanted/${encodeURIComponent(item.id)}`} className="bounty-row"><span className="bounty-rank">{String(rank ?? '↗').padStart(2, '0')}</span><span className="bounty-avatar">{item.name.slice(0, 1).toUpperCase()}</span><span className="bounty-person"><b>{item.name}</b><small>{item.epithet} · {item.crew?.name ?? 'Unknown crew'}</small></span><span className="bounty-status"><StatusPill>{item.status}</StatusPill></span><strong className="bounty-value"><Money value={item.bounty} /></strong><span className="row-arrow">↗</span></Link>
 }
+
 function WantedList() {
   const { token } = useAuth()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const { filters, setFilters } = useWanted()
+
   const [items, setItems] = useState<WantedSummary[]>([])
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [crews, setCrews] = useState<Array<{ id: string; name: string }>>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [draftQ, setDraftQ] = useState(searchParams.get('q') ?? '')
-  const page = Math.max(0, Number(searchParams.get('page') ?? '0') || 0)
-  const size = [10, 20, 50].includes(Number(searchParams.get('size'))) ? Number(searchParams.get('size')) : 10
-  const status = searchParams.get('status') ?? ''
-  const crewId = searchParams.get('crewId') ?? ''
-  const fruit = searchParams.get('fruit') ?? ''
-  const sort = searchParams.get('sort') ?? 'bounty,desc'
-  function update(values: Record<string, string>, resetPage = true) {
-    const next = new URLSearchParams(searchParams)
-    Object.entries(values).forEach(([key, value]) => value ? next.set(key, value) : next.delete(key))
-    if (resetPage) next.set('page', '0')
-    if (!next.get('size')) next.set('size', '10')
-    setSearchParams(next)
+  const [draftQ, setDraftQ] = useState(filters.q)
+
+  const { q, status, crewId, fruit, sort, page, size } = filters
+
+  function update(
+    values: Partial<typeof filters>,
+    resetPage = true,
+  ) {
+    setFilters((current) => ({
+      ...current,
+      ...values,
+      page: resetPage
+        ? 0
+        : (values.page ?? current.page),
+    }))
   }
-  useEffect(() => { setDraftQ(searchParams.get('q') ?? '') }, [searchParams])
+
+  useEffect(() => {
+    setDraftQ(filters.q)
+  }, [filters.q])
+
   useEffect(() => {
     if (!token) return
-    void api.crews(token).then(setCrews).catch(() => setCrews([]))
+
+    let cancelled = false
+
+    api
+      .crews(token)
+      .then((result) => {
+        if (!cancelled) setCrews(result)
+      })
+      .catch(() => {
+        if (!cancelled) setCrews([])
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [token])
+
   useEffect(() => {
-    if (!token) return
+    if (!token) {
+      setLoading(false)
+      return
+    }
+
     const controller = new AbortController()
     const query = new URLSearchParams()
-    query.set('page', String(page)); query.set('size', String(size)); query.set('sort', sort)
+
+    query.set('page', String(page))
+    query.set('size', String(size))
+    query.set('sort', sort)
+
+    if (q) query.set('q', q)
     if (status) query.set('status', status)
     if (crewId) query.set('crewId', crewId)
     if (fruit) query.set('fruit', fruit)
-    if (searchParams.get('q')) query.set('q', searchParams.get('q') ?? '')
-    setLoading(true); setError('')
-    void api.wanted(token, query, controller.signal).then(result => {
-      setItems(result.content); setTotal(result.totalElements); setTotalPages(result.totalPages)
-    }).catch(err => { if (!(err instanceof DOMException && err.name === 'AbortError')) setError(messageOf(err)) })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+
+    setLoading(true)
+    setError('')
+
+    api
+      .wanted(token, query, controller.signal)
+      .then((result) => {
+        setItems(result.content)
+        setTotal(result.totalElements)
+        setTotalPages(result.totalPages)
+      })
+      .catch((err) => {
+        if (
+          !(err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          setError(messageOf(err))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoading(false)
+        }
+      })
+
     return () => controller.abort()
-  }, [token, searchParams.toString()])
-  function submitSearch(event: FormEvent) { event.preventDefault(); update({ q: draftQ.trim() }) }
+  }, [token, q, status, crewId, fruit, sort, page, size])
+
+  function submitSearch(event: FormEvent) {
+    event.preventDefault()
+    update({ q: draftQ.trim() })
+  }
+
   const fruitOptions = ['PARAMECIA', 'ZOAN', 'LOGIA']
-  return <><PageTitle eyebrow="EAST BLUE / INTELLIGENCE ARCHIVE" title="Wanted posters" subtitle="Bounty records collected across the seas." action={<span className="count-badge">{total.toLocaleString()} RECORDS</span>} />
-    <section className="filter-panel"><form className="search-form" onSubmit={submitSearch}><span>⌕</span><input value={draftQ} onChange={e => setDraftQ(e.target.value)} placeholder="Search by name or epithet…" /><button className="button button-dark">Search</button></form>
-      <div className="filter-grid"><label>STATUS<select value={status} onChange={e => update({ status: e.target.value })}><option value="">All statuses</option><option value="AT_LARGE">At large</option><option value="CAPTURED">Captured</option><option value="MISSING">Missing</option></select></label><label>CREW<select value={crewId} onChange={e => update({ crewId: e.target.value })}><option value="">All crews</option>{crews.map(crew => <option key={crew.id} value={crew.id}>{crew.name}</option>)}</select></label><label>DEVIL FRUIT<select value={fruit} onChange={e => update({ fruit: e.target.value })}><option value="">All types</option>{fruitOptions.map(type => <option key={type} value={type}>{type}</option>)}</select></label><label>SORT BY<select value={sort} onChange={e => update({ sort: e.target.value })}><option value="bounty,desc">Highest bounty</option><option value="name,asc">Name A–Z</option><option value="updatedAt,desc">Recently updated</option></select></label></div>
-    </section>
-    <div className="list-meta"><span>{loading ? 'Scanning the archive…' : `Showing ${items.length} of ${total.toLocaleString()} records`}</span><label>ROWS <select value={size} onChange={e => update({ size: e.target.value })}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label></div>
-    {loading ? <LoadingBlock /> : error ? <ErrorBlock message={error} onRetry={() => setSearchParams(new URLSearchParams(searchParams))} /> : items.length ? <div className="bounty-list panel-list">{items.map((item, i) => <WantedRow key={item.id} item={item} rank={page * size + i + 1} />)}</div> : <EmptyBlock title="No posters found" message="Try adjusting your filters or searching for another name." />}
-    <div className="pagination"><span>PAGE {totalPages ? page + 1 : 0} OF {totalPages}</span><div><button className="button button-outline" disabled={page <= 0 || loading} onClick={() => update({ page: String(page - 1) }, false)}>← Previous</button><button className="button button-dark" disabled={loading || totalPages === 0 || page + 1 >= totalPages} onClick={() => update({ page: String(page + 1) }, false)}>Next →</button></div></div>
-  </>
+
+  return (
+    <>
+      <PageTitle
+        eyebrow="EAST BLUE / INTELLIGENCE ARCHIVE"
+        title="Wanted posters"
+        subtitle="Bounty records collected across the seas."
+        action={
+          <span className="count-badge">
+            {total.toLocaleString()} RECORDS
+          </span>
+        }
+      />
+
+      <section className="filter-panel">
+        <form className="search-form" onSubmit={submitSearch}>
+          <span>⌕</span>
+          <input
+            value={draftQ}
+            onChange={(event) => setDraftQ(event.target.value)}
+            placeholder="Search by name or epithet…"
+          />
+          <button className="button button-dark">Search</button>
+        </form>
+
+        <div className="filter-grid">
+          <label>
+            STATUS
+            <select
+              value={status}
+              onChange={(event) =>
+                update({ status: event.target.value })
+              }
+            >
+              <option value="">All statuses</option>
+              <option value="AT_LARGE">At large</option>
+              <option value="CAPTURED">Captured</option>
+              <option value="MISSING">Missing</option>
+            </select>
+          </label>
+
+          <label>
+            CREW
+            <select
+              value={crewId}
+              onChange={(event) =>
+                update({ crewId: event.target.value })
+              }
+            >
+              <option value="">All crews</option>
+              {crews.map((crew) => (
+                <option key={crew.id} value={crew.id}>
+                  {crew.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            DEVIL FRUIT
+            <select
+              value={fruit}
+              onChange={(event) =>
+                update({ fruit: event.target.value })
+              }
+            >
+              <option value="">All types</option>
+              {fruitOptions.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            SORT BY
+            <select
+              value={sort}
+              onChange={(event) =>
+                update({ sort: event.target.value })
+              }
+            >
+              <option value="bounty,desc">Highest bounty</option>
+              <option value="name,asc">Name A–Z</option>
+              <option value="updatedAt,desc">Recently updated</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <div className="list-meta">
+        <span>
+          {loading
+            ? 'Scanning the archive…'
+            : `Showing ${items.length} of ${total.toLocaleString()} records`}
+        </span>
+
+        <label>
+          ROWS
+          <select
+            value={size}
+            onChange={(event) =>
+              update({ size: Number(event.target.value) })
+            }
+          >
+            <option value={10}>10</option>
+            <option value={20}>20</option>
+            <option value={50}>50</option>
+          </select>
+        </label>
+      </div>
+
+      {loading ? (
+        <LoadingBlock />
+      ) : error ? (
+        <ErrorBlock
+          message={error}
+          onRetry={() => {
+            setFilters((current) => ({ ...current }))
+          }}
+        />
+      ) : items.length ? (
+        <div className="bounty-list panel-list">
+          {items.map((item, index) => (
+            <WantedRow
+              key={item.id}
+              item={item}
+              rank={page * size + index + 1}
+            />
+          ))}
+        </div>
+      ) : (
+        <EmptyBlock
+          title="No posters found"
+          message="Try adjusting your filters or searching for another name."
+        />
+      )}
+
+      <div className="pagination">
+        <span>
+          PAGE {totalPages ? page + 1 : 0} OF {totalPages}
+        </span>
+
+        <div>
+          <button
+            className="button button-outline"
+            disabled={page <= 0 || loading}
+            onClick={() =>
+              update({ page: page - 1 }, false)
+            }
+          >
+            ← Previous
+          </button>
+
+          <button
+            className="button button-dark"
+            disabled={
+              loading ||
+              totalPages === 0 ||
+              page + 1 >= totalPages
+            }
+            onClick={() =>
+              update({ page: page + 1 }, false)
+            }
+          >
+            Next →
+          </button>
+        </div>
+      </div>
+    </>
+  )
 }
+
 function WantedDetailPage() {
   const { id = '' } = useParams()
   const { token } = useAuth()
